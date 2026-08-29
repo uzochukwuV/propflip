@@ -8,8 +8,10 @@
 ```
                          ┌──────────────────────────────────────────┐
                          │            SHARED CORE  (Python)           │
-                         │  glossary  ·  checker  ·  generators      │
-                         │  evals     ·  store(abc)  ·  test-cases   │
+                        │            SHARED CORE  (Python)           │
+                        │  characters/locations  · checker  ·       │
+                        │  scene planner  ·  media backend(abc)  ·  │
+                        │  evals  ·  store(abc)  ·  test-cases    │
                          └──────────────────┬─────────────────────────┘
                                             │ import (Python)
             ┌──────────────┬───────────────┼─────────────────┬───────────────┐
@@ -21,8 +23,8 @@
 
 **Core principles**
 1. The core engine has **no dependency on any agent framework**. It exposes plain
-   Python functions (`load_series`, `check_consistency`, `generate_notes`,
-   `update_glossary`) and a `Store` protocol (`LocalStorageStore`, `FirestoreStore`,
+   Python functions (`load_series`, `plan_scenes`, `generate_scenes`,
+   `check_consistency`, `generate_assets`, `update_character`) and a `Store` protocol (`LocalStorageStore`, `FirestoreStore`,
    `ClickhouseAnalyticsStore`).
 2. Each hackathon layer is a **thin wrapper** that mounts the engine behind that
    hackathon's required tech (WebMCP `document.modelContext`, Google ADK + GCP,
@@ -60,8 +62,10 @@ conflict with running arbitrary GCP sidecars).
 
 ## 1c. End-to-end user-request flow (concrete example)
 
-Scenario: *"I just uploaded episode 4's transcript. Check continuity against the series,
-generate YouTube show notes, and make a 6-second teaser video."*
+Scenario: *"I'm building a sci-fi YouTube series. I uploaded the series bible (3 main
+characters + their looks/clothing, 2 locations, 5 established facts) and episode 4's script.
+Break it into scenes, generate each scene as video keeping characters/look/clothing/emotion
+consistent, check continuity, write YouTube notes, and make a 6-second teaser."*
 
 **The request lands on an agent. What actually runs, per stack:**
 
@@ -78,227 +82,322 @@ User request
                             │
          ┌──────────────────┼───────────────────┐
          ▼                  ▼                   ▼
-   ① load_series           (same call)        (same call)
-      • parses transcripts  • same call         • same call
-      • extracts entities   • same              • same
+   ① load_series            (same call)         (same call)
+      • parse series bible   • same              • same
+        (characters w/       • same              • same
+         visual_ref/lora/    • same              • same
+         clothing/emotions)  • same              • same
+      • parse ep script →    • same              • same
+        scene chunks          • same              • same
                             │
          ┌──────────────────┼───────────────────┐
          ▼                  ▼                   ▼
-   ② check_consistency      (same)              (same)
-      • deterministic       • same               • same
-        rules (name/variant • same               • same
-        matching, callbacks, (same)              (same)
-        CTA checks)         • same               • same
-      • LLM tier (Gemini)    (same)              (same)
-      • writes Metric       • Firestore         • ClickHouse
+   ② plan_scenes             (same)              (same)
+      • per scene: pin seed,  • same              • same
+        resolve character     • same              • same
+        refs + LoRA, set       • same              • same
+        emotion/clothing        • same              • same
+      • emit GenerationSpec    • same              • same
+      (Comfy workflow JSON      • same              • same
+       OR Veo params)           • same              • same
                             │
          ┌──────────────────┼───────────────────┐
          ▼                  ▼                   ▼
-   ③ generate_notes          (same)              (same)
-      YouTube template        • same               • same
-      (core engine)          • same               • same
+   ③ generate_scenes         (same core)         (same core)
+      BUT media backend differs:
+      Layer 1 (WebMCP):  backend FastAPI proxy ◄── Comfy Cloud MCP
+                         (search_templates →    (Wan 2.2 OSS or
+                          apply_slots →          Google Veo partner)
+                          wait_for_job →
+                          get_output → download)
+      Layer 2 (GAT):     ADK MCPToolset ◄── Comfy Cloud MCP same as above,
+                         assets → GCS + Firestore
+      Layer 3 (Cinema):  ADK agent ◄── Veo-on-Vertex directly (compliant),
+                         assets → GCS +
+                         ClickHouse metrics     • ClickHouse
+                                          (compliance partner)
                             │
          ┌──────────────────┼───────────────────┐
          ▼                  ▼                   ▼
-   ④ MEDIA — the step that branches by stack:
-                            │
-     Layer 1 (WebMCP)       Layer 2 (GAT)        Layer 3 (Cinema)
-     no media gen in        ADK agent calls:     ADK agent calls:
-     the page itself        • Comfy MCP          • Veo directly on
-     (optional backend):    partner_generate     Vertex AI (compliant)
-     backend → Comfy        (Wan 2.2 OSS or     OR Comfy→partner_
-     or Veo; returns        Google Veo partner) generate→Veo       • ClickHouse
-     URL back to page       • returns asset URL   analytics written  (compliance
-     via WebMCP tool         to GCS, asset URL   partner)            partner)
-     set_episode_asset      to Firestore        (not Comfy)
+   ④ check_consistency       (same)              (same)
+      • appearance_drift     • same              • same
+        (ref-image hash)      • same              • same
+      • clothing_drift        • same              • same
+      • emotion_drift         • same              • same
+      • setting_drift         • same              • same
+      • name_drift /          • same              • same
+        callback_coverage      • same              • same
+      • facts                 • same              • same
+      persist Metric           • Firestore         • ClickHouse
                             │
          ┌──────────────────┼───────────────────┐
          ▼                  ▼                   ▼
-   ⑤ Human sees the      ⑤ Firestore           ⑤ ClickHouse
-      live page update    persisted state      metrics +
-      (findings list,     + GCS asset          Veo video
-      notes preview,      • demo ready          in GCS
-      teaser preview)     (Cloud Run)          • demo ready
-                                              (Cloud Run)
+   ⑤ generate_assets          (same)              (same)
+      (teaser/thumbnail/notes,  • same              • same
+       same media backends as   • same              • same
+       step ③)                  • same              • same
+                            │
+         ┌──────────────────┼───────────────────┐
+         ▼                  ▼                   ▼
+   ⑥ Human result             ⑥ Firestore         ⑥ ClickHouse + GCS
+      • page reflects          persisted state    metrics +
+        findings + scene        + GCS assets      Veo/comfy videos
+        videos + teaser         (Cloud Run)       (Cloud Run)
+      (via set_episode_asset   • demo ready
+       / set_scene_video)      (Cloud Run)
 ```
 
 **Key invariants across all layers:**
-- Steps ①–③ are the **same core engine** (pure Python); only the persistence store differs.
-- Step ④ (media) is where stacks **diverge**: WebMCP/GAT can use Comfy's OSS-or-Google-video
-  (no vendor restriction on GAT, none on WebMCP); Cinema must keep the AI on Google
-  (Veo-on-Vertex, optionally orchestrated through Comfy's Google partner node) so it stays
-  compliant.
-- Step ⑤ is always a **persistence write** (Firestore / ClickHouse / GCS) plus, for WebMCP
-  only, a `set_episode_asset` tool call that reflects the result back onto the live page.
+- Steps ①–②, ④–⑤ are the **same core engine** (pure Python); only the persistence store
+  and the media backend adapter differ.
+- Step ③ (media generation) is the **only** divergence: ① it can run fully client-side in
+   the browser for WebMCP (Pyodide core + backend proxy), ② it uses Comfy Cloud MCP for
+   WebMCP/GAT (no AI-vendor restriction on either), ③ it uses **Veo-on-Vertex** directly
+   for Cinema (Google-only).
+- Step ⑥ is always: persist findings/metrics/assets (Firestore / ClickHouse / GCS) + a
+   **reflection-back** so the human sees the live result — for WebMCP that's a tool call
+   (`set_scene_video`/`set_episode_asset`) that updates the page DOM; for GAT/Cinema it's
+   a Cloud Run-rendered UI or a shareable Comfy canvas link.
 
-## 2. Data model
+## 2. Data model — AI video-series continuity
 
 ```mermaid
 classDiagram
     class Series {
         +series_id: str
         +name: str
-        +tone_rules: list[str]
+        +tone_rules: list[str]        # e.g. "cinematic", "desaturated palette", "no modern tech"
         +language: str
     }
-    class Entity {
-        +canonical: str          # truthy name
-        +variants: list[str]     # aliases / misspellings the checker flags
-        +type: character|location|term|phrase|fact
-        +first_seen_ep: str
-        +notes: str
+    class Character {
+        +canonical: str
+        +variants: list[str]          # aliases the checker flags
+        +visual_ref: str             # stable reference image URL / asset key
+        +lora_ref: str               # consistent LoRA/embedding for generation
+        +clothing_styles: list[str]  # canonical wardrobe per scene context
+        +emotion_presets: list[str]  # rage / calm / weary ...
+        +first_seen: str             # scene_id
     }
-    class Episode {
+    class Location {
+        +canonical: str
+        +variants: list[str]
+        +visual_ref: str
+        +description: str
+    }
+    class Fact {
+        +claim: str
+        +source_scene: str            # scene_id where it was established
+        +confidence: float
+    }
+    class Scene {
+        +scene_id: str
         +episode_id: str
-        +series_id: str
-        +title: str
-        +ref: str                # transcript / URL / file path
-        +created_at: datetime
+        +setting: str
+        +characters: list[SceneChar] # {character, emotion_directive, clothing_state}
+        +script: str
+        +seed: int                  # FIXED for cross-scene reproducibility
+        +ref_image: str             # seed / keyframe image for this scene
+        +workflow_id: str           # Comfy/Veo workflow used
+        +status: planned|generated|verified
     }
     class ConsistencyFinding {
-        +type: name_drift|tone_drift|callback_coverage|cta_gap|facts
-        +episode_id: str
+        +type: appearance_drift|clothing_drift|emotion_drift|setting_drift|name_drift|callback_coverage|facts
+        +target: str                # character|location|scene_id|episode_id
         +severity: low|med|high
         +excerpt: str
         +suggestion: str
+        +evidence_ref: str
     }
     class GeneratedAsset {
-        +episode_id: str
-        +platform: youtube|podcast|blog|linkedin|x
-        +content: str
+        +key: str
+        +kind: video|teaser|thumbnail|notes
+        +ref: str                   # GCS/Cloud URL or local path
+        +workflow_id: str
         +version: str
     }
     class Metric {
         +series_id: str
         +episode_id: str
-        +score: float
-        +breakdown: dict          # per-check sub-scores
+        +scene_id: str
+        +score: float               # 0–1 continuity accuracy
+        +breakdown: dict            # per-drift sub-scores
         +ts: datetime
     }
-    Series "1" --> "0..*" Entity : glossary
-    Series "1" --> "0..*" Episode : episodes
-    Episode "1" --> "0..*" ConsistencyFinding : findings
-    Episode "1" --> "0..*" GeneratedAsset : assets
-    Episode "1" --> "0..*" Metric : analytics
+    Series "1" --> "0..*" Character : characters
+    Series "1" --> "0..*" Location : locations
+    Series "1" --> "0..*" Fact : facts
+    Series "1" --> "0..*" Episode
+    Episode "1" --> "0..*" Scene
+    Scene "1" --> "0..*" ConsistencyFinding
+    Scene "1" --> "0..*" GeneratedAsset
+    Scene "1" --> "0..*" Metric
 ```
 
-- **Entity.variants**: collected by the checker + corrected by the generator/human.
-  Matching is fuzzy (`rapidfuzz.token_set_ratio`) with a threshold tuned per type.
-- **Metric**: the schema persisted to ClickHouse in Layer 3 (Cinema) for analytics.
-- **Store protocol**: `class Store(Protocol)` with `get_series / save_series /
-  list_episodes / save_finding / save_metric` — implemented by local JSON
-  (Layer 1 / micro1), Firestore (Layer 2), ClickHouse (Layer 3).
+This is **frame-level / scene-level** continuity — not just text. The thing being kept
+consistent is: which character is on screen, how they look (appearance), what they're
+wearing (clothing), how they feel (emotion), where they are (setting), and whether they
+reference something established earlier (callbacks / facts). The core engine bakes
+**fixed seeds + reference images + character LoRAs** into every generation so scenes stay
+visually coherent scene-to-scene and episode-to-episode.
 
-## 3. Core engine — internal flow
+- **Character.lora_ref / visual_ref**: the single most important continuity lever — a
+  persisted character LoRA / seed image that every scene generation reuses.
+- **Scene.seed**: pinned per scene and stored, so re-runs are deterministic. Drift in a
+  re-run = a regression the checker can flag.
+- **Metric.per scene + per episode**: written to ClickHouse (Cinema) and Firestore (GAT)
+  so the agent can query "which scenes have appearance_drift > 0.5".
+- **Store protocol**: `class Store(Protocol)` with `get_series / save_character /
+  list_scenes / save_finding / save_metric` — implemented by local JSON (WebMCP),
+  Firestore (GAT), ClickHouse (Cinema).
+
+## 3. Core engine — internal flow (video continuity)
 
 ```
-1. load_series(series) ──► Store.put(Series, entities, episodes)
-   │  parse transcript → chunk by speaker / topic boundary (sliding window)
-   │  extract candidate entities via NER (gemini via vertex, or open local model)
-   │  dedupe against existing glossary (fuzzy match variants)
-   │
-2. check_consistency(series_id, checks) ──► [ConsistencyFinding]
-   ├── name_drift      : each entity.variants occurrence vs canonical name
-   ├── tone_drift      : per-episode embedding centroid vs series tone_rules
-   ├── callback_coverage: planned callbacks vs mentions; flags missed callbacks
-   ├── cta_gap         : episode-level CTA presence (regex + LLM verify)
-   ├── facts           : cross-episode claim contradiction (agentic self-check)
-   └── persist Metric(score, breakdown) to Store
-   │
-3. generate_notes(episode_id, platform, cta) ──► GeneratedAsset
-   │  pull episode chunk + glossary context + consistency findings
-   │  render via platform template (YouTube desc, podcast show notes, blog)
-   │
-4. evals/run_eval(series_id, hard_cases) ──► Report
-   ├── baseline: one-shot generation WITHOUT memory
-   ├── agent:    check → correct → generate WITH memory
-   ├── compare:  consistency score, token cost, hard-case pass rate
-   └── write changelog.md + trajectories/
+1. load_series(series_bible, episode_script) ──► Store
+   |  parse series bible: characters (visual_ref/lora_ref/clothing/emotions),
+   |    locations, facts, tone_rules
+   |  parse episode script → chunk into scenes (setting + characters + beat)
+   |
+2. plan_scenes(series_id, episode_id) ──► [Scene]
+   |  for each scene: resolve character refs + LoRAs + fixed seed
+   |  emit a generation spec (Comfy workflow JSON OR Veo params) with
+   |    seed pinned, character ref image + LoRA, emotion directive baked in
+   |
+3. generate_scenes(specs) ──► [GeneratedAsset.video]
+   |  invoke media backend (Comfy MCP or Veo-on-Vertex) per spec
+   |  wait_for_job / get_output / download → store asset + workflow_id
+   |
+4. check_consistency(series_id, episode_id) ──► [ConsistencyFinding]
+   |  appearance_drift   : frame embedding similarity vs Character.visual_ref
+   |  clothing_drift     : does the on-screen outfit match Scene.characters[i].clothing_state
+   |  emotion_drift      : per-scene emotion vs intended directive (vision-LM check)
+   |  setting_drift      : location coherence across scenes of the same setting
+   |  name_drift         : character/place name variants vs Character.canonical
+   |  callback_coverage  : planned callbacks vs actual on-screen references
+   |  facts            : contradictions with stored Fact claims
+   |  persist Metric(score, breakdown) per scene + per episode
+   |
+5. generate_assets(episode_id, kinds=[teaser, thumbnail, notes]) ──► [GeneratedAsset]
+   |  teaser: short video from ep highlights (Comfy / Veo)
+   |  thumbnail: key frame + overlay text (Comfy / Gemini image)
+   |  notes: YouTube/Podcast/blog copy (prompt-templated, uses glossary)
+   |
+6. evals/run_eval(series_id, episodes, hard_cases) ──► Report
+   |  baseline: one-shot generation, fresh seed, NO character refs / LoRAs
+   |  agent:    plan → generate → check → correct → regenerate WITH memory + refs
+   |  compare:  continuity_accuracy (drift incidents missed/fixed), token cost,
+   |            rerun reproducibility (same seed → same frame check)
+   |  write changelog.md + trajectories/
 ```
 
-The checker uses a **two-tier verification** (mirrors micro1's rubric):
-- **Deterministic tier** (rules + fuzzy match) — fast, reproducible, tested.
-- **LLM tier** (Gemini 3.5) for claim contradiction + tone drift — called only when the
-  deterministic check is ambiguous. All LLM calls are logged for trajectory dumps.
+**Media-backend abstraction.** The engine does not hard-code Comfy or Veo — it produces a
+`GenerationSpec` (`{model:"veo"|"comfy", seed, ref_images, prompt_overrides, video_template}`)
+and a `MediaBackend` adapter runs it. This is what lets the same engine:
+- stay Google-only (Veo adapter) for **Cinema**,
+- use Comfy Cloud MCP (OSS or Google-Veo partner node) for **WebMCP/GAT**,
+- use a coding agent's local ComfyUI for **micro1** if the problem is media continuity.
+
+The checker's **two-tier verification** mirrors micro1's rubric:
+- **Deterministic tier** (rules + fuzzy match + perceptual-hash ref-image comparison) — fast,
+  reproducible, unit-tested.
+- **LLM tier** (Gemini 3.5 Vision) for emotion/setting judgment + fact contradiction — called
+  only when the deterministic check is ambiguous. All LLM calls are logged for trajectory
+  dumps (required by micro1; useful for evals everywhere).
 
 ## 4. Layer 1 — WebMCP Challenge flow (Sep 3)
 
 ```
-Browser (Chrome 149+ / ChatGPT)                       Backend (optional)
-┌──────────────────────────────────────┐   ┌─────────────────────────────┐
-│ React + Vite SPA                     │   │ FastAPI on Cloud Run/Vercel │
-│                                      │   │                             │
-│  <App/> loads SeriesStudio lib       │   │  /api/consistency            │
-│  (Pyodide-compiled core)             │   │  /api/generate               │
-│                                      │   │                             │
-│  document.modelContext.registerTool( │   │  (only if Pyodide too slow)  │
-│    load_series   / check_consistency │◀──│◀── proxy for heavy ops      │
-│    generate_notes / update_glossary  │   │                             │
-│  )                                   │   │                             │
-│                                      │   │                             │
-│  Human edits glossary in live UI ◀──►│   │                             │
-│  Agent calls tools via MCP client   ◀──►│                             │
-└──────────────────────────────────────┘   └─────────────────────────────┘
+Browser (Chrome 149+ / ChatGPT)            Backend (optional, FastAPI on Cloud Run/Vercel)
+┌──────────────────────────────────────┐   ┌─────────────────────────────────────────────┐
+│ React + Vite SPA                     │   │  /api/generate → Comfy Cloud MCP             │
+│                                      │   │  /api/check    → Comfy MCP + core engine     │
+│  <App/> loads SeriesStudio (Pyodide) │   │  /api/plan     → plan_scenes core            │
+│                                      │   │  (only if Pyodide too slow for media)        │
+│  document.modelContext.registerTool( │   │                                             │
+│    load_series        / plan_scenes │◀──│◀── proxy for heavy video ops                  │
+│    check_consistency  / generate_   │   │                                             │
+│    scenes / set_scene_video        │   │                                             │
+│    update_character               │   │                                             │
+│  )                                 │   │                                             │
+│                                      │   │                                             │
+│  Human edits character sheet ◀──►   │   │                                             │
+│  Agent calls tools via MCP client  ◀──►│◀── returns scene videos + asset URLs          │
+└──────────────────────────────────────┘   └─────────────────────────────────────────────┘
 ```
 
 **Runtime contract:**
-- On page load: `SeriesStudio.init()` registers all 4 tools + a `get_series_state`
-  resource (`modelContext.registerResource`) so the agent can read current glossary.
-- `load_series`: human uploads a CSV/transcripts → core ingests → UI updates live.
-- `check_consistency`: tool runs the core checker → returns a JSON report that the
-  UI renders as a checklist of findings (agent + human can both act on it).
-- `update_glossary`: agent proposes an entity correction → UI shows a **confirmation
-  dialog** (the spec supports `requestUserConfirmation`); human accepts/denies.
-- All state is mirrored to `localStorage` so a judge revisiting the URL sees the
-  same series (reproducible demo).
+- On page load: `SeriesStudio.init()` registers tools + a `get_series_state` resource
+  (`modelContext.registerResource`) so the agent can read the live glossary/characters.
+- `load_series`: human uploads a series bible (characters + looks/clothing, locations,
+  facts, tone) + episode scripts → core ingests → scene list renders live on the page.
+- `plan_scenes`: agent plans scenes → returns seeds + ref-image/LoRA assignments the UI
+  shows as a per-scene card (so the human sees the continuity plan).
+- `check_consistency`: tool runs the core checker → UI renders a visual checklist of
+  drift findings (appearance / clothing / emotion / setting / callbacks) with the
+  evidence frame thumbnail — agent + human both act on it.
+- `generate_scenes`: agent calls Comfy (via backend proxy) → `wait_for_job`/`get_output`
+  → returns a scene-video URL the page displays inline.
+- `update_character`: agent proposes a character correction → UI shows a **confirmation
+  dialog**; human accepts/denies (the spec supports `requestUserConfirmation`).
+- `set_scene_video`: writes a generated scene video back onto the page so the human sees
+  it the instant it lands.
+- All state mirrored to `localStorage` so a judge revisiting the URL sees the same series
+  (reproducible demo).
 
-**Origin isolation:** set `Origin-Agent-Cluster: ?1` header (Vercel `vercel.json`
-headers, or `_headers` on Cloudflare Pages) so `document.modelContext` is enabled.
+**Origin isolation:** set `Origin-Agent-Cluster: ?1` header (Vercel `vercel.json` headers,
+or `_headers` on Cloudflare Pages) so `document.modelContext` is enabled.
 
 ## 5. Layer 2 — All Things Agentic flow (Aug 31, Collaborative Partner track)
 
 ```
 Human creator            Cloud Run (Gemini+ADK)         Firestore                  Pub/Sub
    │                         │                            │                          │
-   │ "check continuity for │                            │                          │
-   │  my series S1"          │                            │                          │
-   ├────────────────────────► LlmAgent (Gemini 3.5)       │                          │
-   │                         │ tools: load_series,        │                          │
-   │                         │   check_consistency,       │                          │
-   │                         │   generate_notes,          │                          │
-   │                         │   update_glossary          │                          │
-   │                         │ memory: FirestoreMemory    ◄──────────────────────────┤
-   │                         │    (series canon persists) │                          │
-   │                         │  ┌────────────────────────┐                          │
-   │                         │  │ loop: plan→act→verify   │                          │
-   │                         │  │ ask clarifying Qs       │                          │
-   │                         │  │ propose glossary edits   │                          │
-   │                         │  │ await human confirmation │◀─────────────────────────┤
-   │                         │  └────────────────────────┘                          │
-   │ ◄────────────────────────  report findings + suggestions                        │
-   │                         │                            │                          │
-   │                         │ (async)  Pub/Sub trigger fires on  │                  │
-   │                         │            new episode in Cloud Storage              │
-   │                         │  ──► Cloud Run worker ──► check_consistency          │
-   │                         │                            │──► save Metric         │
-   │                         │                            │──► update Firestore    │
+   │ "make ep 4: check       │                            │                          │
+   │  continuity + scene     │                            │                          │
+   │  videos + a teaser"     │                            │                          │
+   ├───► LlmAgent(Gemini 3.5)│                            │                          │
+   │     tools: load_series,  │                            │                          │
+   │       plan_scenes,       │                            │                          │
+   │       generate_scenes,   │                            │                          │
+   │       check_consistency, │                            │                          │
+   │       generate_assets,   │                            │                          │
+   │       update_character   │                            │                          │
+   │       + Comfy MCPToolset (MCPCloudMCP)   │                          │
+   │     memory: FirestoreMemory ◄────────────────────────┤                          │
+   │       (series canon/characters persist) │                          │
+   │      ┌─────────────────────────────────┐                          │
+   │      │ loop: plan→act→verify            │                          │
+   │      │ ask clarifying Qs ("Jon or      │                          │
+   │      │   John in ep3?")                │                          │
+   │      │ propose character corrections   │                          │
+   │      │ await human confirmation        ◄──────────────────────────┤
+   │      └─────────────────────────────────┘                          │
+   │    ◄───────────  report findings + scene videos + teaser          │
+   │                        │                          │                          │
+   │                        │ (async) Pub/Sub on new episode in GCS    │
+   │                        │ ──► Cloud Run worker ──► check_consistency│                          │
+   │                        │                            │──► save Metric│                          │
+   │                        │                            │──► update Firestore│                          │
 ```
 
-**Why Collaborative Partner (not Taskmaster):**
-The core value is a **stateful, multi-turn, memory-backed conversation** where the agent
-asks "Did you really mean 'Jon' or 'John' in ep 3?" and remembers the canonical name
-next episode. That is the Collaborative Partner definition verbatim ("asks clarifying
-questions, guides the user, captures feedback, adapts").
+**Why Collaborative Partner (not Taskmaster):** the core value is a **stateful,
+multi-turn, memory-backed conversation** where the agent asks "Did you really mean 'Jon' or
+'John' in ep 3?" and remembers the canonical look next episode. That is the Collaborative
+Partner definition verbatim ("asks clarifying questions, guides the user, captures feedback,
+adapts").
 
-- **Gemini:** `gemini-3.5-flash-002` via Vertex AI (`google-cloud-aiplatform`).
-  Accepted package + required "Gemini 3.5 or newer" rule verified.
-- **Framework:** Google ADK Python. `LlmAgent` with the 4 core functions as
-  `@tool`-decorated functions wrapping the core engine.
-- **Memory:** ADK `FirestoreMemory` (or a custom `Memory` backed by Firestore) keyed by
-  `series_id` — survives across sessions (the "long-term memory" the track rewards).
-- **Async/Taskmaster alternative:** wire the Pub/Sub→Cloud Run path as the event-driven
-  "Taskmaster" story (new episode → agent auto-runs checks → emails findings). You can
-  submit the same repo under either track by changing the framing in the README/video.
+- **Gemini:** `gemini-3.5-flash-002` via Vertex AI (`google-cloud-aiplatform`). Verified
+  accepted package + "Gemini 3.5 or newer" rule.
+- **Framework:** Google ADK Python. `LlmAgent` with core functions as `@tool`-decorated
+  functions + `MCPToolset` for Comfy Cloud MCP.
+- **Memory:** ADK `FirestoreMemory` keyed by `series_id` (characters, visual refs,
+  canonical clothing) — survives across sessions.
+- **Media:** Comfy Cloud MCP via ADK `MCPToolset` (`search_templates`/`apply_slots`/
+  `wait_for_job`/`get_output`), assets to Cloud Storage + Firestore. (No AI-vendor
+  restriction on GAT, so OSS video like Wan 2.2 is fine; Google Veo partner node also works.)
+- **Async/Taskmaster alternative:** the Pub/Sub→Cloud Run path is the event-driven
+  "Taskmaster" story (new episode → agent auto-runs checks → emails findings). Submit the
+  same repo under either track by changing the framing in the README/video.
 
 **Submission proof-of-GCP:** deploy on Cloud Run, screenshot the Cloud Run service detail
 page + a Firestore document in the demo video. Cost: Cloud Run always-free + Firestore
@@ -306,48 +405,76 @@ free tier + $150 credits.
 
 ## 6. Layer 3 — Agentic Cinema flow (Sep 9, ClickHouse partner track)
 
-Same ADK agent as Layer 2, plus a **runtime ClickHouse integration** via
-`mcp-clickhouse` + ADK `MCPToolset`. Frame: "Series Continuity & Show-Notes Agent for
-independent creators."
+Same ADK agent as Layer 2, with two hard constraints layered on top:
+(a) **media AI must be Google-only** (Veo-on-Vertex via `google-cloud-aiplatform`), and
+(b) **must call one partner at runtime** (ClickHouse here). Frame: *"Series Continuity &
+Show-Notes Agent for independent creators."*
 
 ```
-Human creator        Cloud Run (Gemini+ADK)        Firestore (state)   ClickHouse (analytics)
-   │                    │                             │                    │
-   │ "run continuity     │                             │                    │
-   │  analytics for S1"  │                             │                    │
-   ├──► LlmAgent         │                             │                    │
-   │                    │  tools: core engine functions                     │
-   │                    │   + MCPToolset(mcp-clickhouse)                    │
-   │                    │     → sql_query, sql_insert, sql_describe        │◄─►
-   │                    │   memory: FirestoreMemory (canon)                  │
-   │                    │  ┌────────────────────────────────────────┐      │
-   │                    │  │ plan: check_consistency(series)         │      │
-   │                    │  │        → agent calls CHECK →             │      │
-   │                    │  │        → agent calls SQL_INSERT metrics   │      │
-   │                    │  │        → agent calls SQL_QUERY for drift  │      │
-   │                    │  │          "compare ep 5 vs ep 12 tone"     │      │
-   │                    │  │        → generate_notes(platform=youtube)   │      │
-   │                    │  └────────────────────────────────────────┘      │
-   │ ◄──── report +    │                             │                    │
-   │  metrics table    │                             │                    │
+Human creator  Cloud Run (Gemini+ADK)     Firestore (state)   ClickHouse (analytics)
+   │             │                          │                    │
+   │ "produce ep4  │                          │                    │
+   │  with visual   │                          │                    │
+   │  continuity"   │                          │                    │
+   ├──► LlmAgent   │                          │                    │
+   │     tools: core engine (load_series,    │                    │
+   │       plan_scenes, check_consistency,   │                    │
+   │       generate_assets, update_char)   │                    │
+   │     + Veo adapter (google-cloud-aiplatform)  ◄── only Google AI
+   │     + MCPToolset(mcp-clickhouse)        │                    │
+   │       → sql_query / sql_insert          │◄──► partner used  │
+   │     memory: FirestoreMemory (canon)     │                    │
+   │    ┌────────────────────────────────────────┐                │
+   │    │ plan: load_series(bible+script)      │                │
+   │    │   → plan_scenes (pins seeds + refs)  │                │
+   │    │   → generate_scenes via VEO (Google) │                │
+   │    │   → check_consistency (drift scan)   │                │
+   │    │      → agent calls SQL_INSERT        │                │
+   │    │         continuity_metrics(...)      │                │
+   │    │   → generate_assets(teaser/notes)   │                │
+   │    │   → SQL_QUERY "episodes w/ drift>0.5"│                │
+   │    └────────────────────────────────────────┘                │
+   │ ◄────── report + scene videos + metrics table               │
 ```
 
 **How the partner is "used at runtime in code" (passes Cinema review):**
-- `mcp-clickhouse` is launched as a real stdio subprocess (not README mention).
-- ADK `MCPToolset` imports its `sql_query` / `sql_insert` tools into the agent.
-- The agent's loop **calls** these tools to:
-  1. `INSERT INTO continuity_metrics (...)` after each `check_consistency` run.
-  2. `SELECT` trend queries ("episodes where name_drift > 0.5") to explain findings.
-- Demo video shows the agent's trace (ADK `InMemoryTrace`) making ClickHouse tool calls
-  + a Grafana dashboard reading from the same ClickHouse cluster.
+- `mcp-clickhouse` is launched as a real subprocess / connected over HTTP (not a README
+  mention). ADK `MCPToolset` imports its `sql_query`/`sql_insert` tools into the agent.
+- **Schema we create in ClickHouse** (the compliance story — a real table the agent writes to
+  and reads back):
+  ```sql
+  CREATE TABLE continuity_metrics (
+    series_id   String,
+    episode_id  String,
+    scene_id    String,
+    metric_ts   DateTime,
+    overall     Float64,
+    name_drift  Float64, appearance_drift Float64,
+    clothing_drift Float64, emotion_drift Float64,
+    setting_drift  Float64, callback_coverage Float64
+  ) ORDER BY (series_id, episode_id, scene_id);
+  ```
+- The agent **calls** these tools: (1) `sql_insert` continuity_metrics after every
+  `check_consistency` run, (2) `sql_query` trend questions ("scenes where appearance_drift
+  > 0.5", "ep4 vs ep3 character-distance") to explain findings in the demo.
+- `get_billing_status` / `get_queue` from Comfy Cloud MCP prove your 5 free runs were
+  consumed (nice extra evidence, not the partner).
 
-**ClickHouse setup:** free $400 credits via `promo=SIGNUP100`; or prototype against the
-public playground (`sql-clickhouse.clickhouse.com`, `demo` user). `mcp-clickhouse` env:
-`CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_SECURE=true`, transport `stdio` for
-local / `http` with token for Cloud Run.
+**Why ClickHouse (not Comfy) is the Cinema partner:** Cinema's allowed AI = Google Cloud AI
+or the *chosen partner's* built-in AI. Comfy is NOT a Cinema partner and its own video
+models aren't Google. So:
+- ✅ **Google video = Veo on Vertex AI** (`google-cloud-aiplatform`) — the AI.
+- ✅ **ClickHouse = the compliance partner** — queried via `mcp-clickhouse` at runtime.
+- ⚠️ **Comfy** = optional non-AI orchestration layer (templates/search/share + serving Veo
+  assets), not the partner. Don't list Comfy as your Cinema track.
 
-**Optional Grafana layer:** ADK's OpenLIT instrumentation → Grafana AI Observability
-MCP tools read agent traces. This is the "observe the agent you build" bonus.
+**ClickHouse setup:** free $400 credits via `promo=SIGNUP100` (verified); or prototype
+against the public playground (`sql-clickhouse.clickhouse.com`, `demo` user). `mcp-clickhouse`
+env: `CLICKHOUSE_HOST`, `CLICKHOUSE_USER`, `CLICKHOUSE_SECURE=true`, transport `stdio` local
+/ `http` + token for Cloud Run.
+
+**Optional Grafana layer:** ADK OpenLIT instrumentation → Grafana Cloud MCP reads agent
+traces. Bonus observability ("observe the agent you build"), not the compliance partner.
 
 ## 7. Layer 4 — micro1 sprint (Aug 31) — applied to the core
 
@@ -371,46 +498,59 @@ judgment.
 
 ```python
 # agents/continuity_agent.py
-import trace
+import os
 from google.adk.agents import LlmAgent
-from google.adk.tools import FunctionTool, MCPToolset
-from core.engine import load_series, check_consistency, generate_notes, update_glossary
+from google.adk.tools import FunctionTool, MCPToolset, McpConnectionParams
+from core.engine import load_series, plan_scenes, generate_scenes, check_consistency
+from core.engine import generate_assets, update_character
+from core.media_backend import VeoBackend, ComfyCloudBackend
 from core.firestore_store import FirestoreMemory
 
-# Core functions become agent tools (no framework coupling inside core)
-_tools = [
+# Core engine functions → ADK tools (core stays framework-agnostic)
+core_tools = [
     FunctionTool(load_series),
+    FunctionTool(plan_scenes),
     FunctionTool(check_consistency),
-    FunctionTool(generate_notes),
-    FunctionTool(update_glossary),
+    FunctionTool(generate_assets),
+    FunctionTool(update_character),
 ]
 
-# Layer 3 ONLY: add ClickHouse partner at runtime
-try:
-    _tools.append(MCPToolset(
-        connection_params={"transport": "stdio", "command": "mcp-clickhouse"}
-    ))
-except Exception:
-    pass  # Layer 2 doesn't require it
+# Layer 2 (GAT): Comfy Cloud MCP for media (OSS video OK; Google Veo partner node OK too)
+comfy_tools = MCPToolset(
+    connection_params=McpConnectionParams(
+        transport="streamable-http",
+        url="https://cloud.comfy.org/mcp",
+        headers={"X-API-Key": os.environ["COMFY_API_KEY"]},
+    )
+)
+
+# Layer 3 (Cinema): ClickHouse partner (runtime) + Google Veo for the AI
+clickhouse_tools = MCPToolset(
+    connection_params=McpConnectionParams(
+        transport="stdio", command="mcp-clickhouse"
+    )
+)
 
 agent = LlmAgent(
     model="gemini-3.5-flash-002",
     name="series_continuity_agent",
     instruction=(
         "You are a continuity guardian for a creator's series. "
-        "You maintain a living glossary and verify cross-episode consistency. "
-        "Before suggesting a glossary change, ask the human to confirm. "
-        "Always explain your reasoning and cite which episode a claim was found in."
+        "Break scripts into scenes with FIXED seeds + per-character reference images "
+        "and LoRAs so characters look identical scene-to-scene. "
+        "After generating, scan for appearance / clothing / emotion / setting drift. "
+        "Before changing a character sheet, ask the human to confirm. "
+        "Always cite which scene a fact was established in."
     ),
-    tools=_tools,
+    tools=[*core_tools, comfy_tools],          # Layer 2
+    # tools=[*core_tools, clickhouse_tools],   # Layer 3 (uncomment + Veo backend)
     memory=FirestoreMemory(collection="studio_memory"),
 )
-
-root_agent = agent
 ```
 
 **Entry points:**
-- `main.py` → `adk_agents.run(agent, session_service=FirestoreSessionService)` (web/Layer 2).
-- `worker/main.py` → Pub/Sub-triggered Cloud Run job calling `check_consistency`
-  (Layer 2 async; Layer 3 can reuse).
-- `streamlit_app.py` or `cmd/` for quick local demo.
+- `main.py` → `adk_agents.run(agent, ...)` (web/Layer 2/3 entry).
+- `worker/main.py` → Pub/Sub-triggered Cloud Run job: `load_series → plan_scenes →
+  generate_scenes(VeoBackend) → check_consistency → sql_insert(metrics)` (Layer 3 async).
+- `cmd/local_demo.py` → runs the core engine + local ComfyUI (`comfy-mcp` stdio) end-to-end
+  with no cloud (micro1-friendly, fully reproducible).
