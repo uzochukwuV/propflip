@@ -93,7 +93,7 @@ class StateStore:
         p = self.chars / f"{name}.json"
         if not p.exists():
             return CharacterState(name=name)
-        return CharacterState(name=name, **json.loads(p.read_text()))
+        return CharacterState(**json.loads(p.read_text()))
 
     def save_character(self, state: CharacterState) -> None:
         (self.chars / f"{state.name}.json").write_text(
@@ -146,4 +146,4 @@ class StateStore:
 
 def re_sub(s: str) -> str:
     import re as _re
-    return _re.sub(r"[^a-z0-9]+", "_", s).strip("_")
+    return _re.sub(r"[^A-Za-z0-9]+", "_", s).strip("_")

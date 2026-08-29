@@ -19,9 +19,10 @@ from google.adk.agents import LlmAgent
 from google.adk.tools import FunctionTool
 
 from .core.continuity import ConsistencyEngine as _Engine
+from .config import make_llm  # provider: TokenRouter now, Gemini later
 from .state.store import StateStore
 
-MODEL = "gemini-2.0-flash"
+MODEL = None  # resolved per-agent by make_llm()
 
 
 def _engine_tools(engine: _Engine) -> list[FunctionTool]:
@@ -37,7 +38,7 @@ def build_planner(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="episode_planner",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Episode Planner. From the Series Bible, emit a JSON "
             "beat-sheet (Hook, 2 rising beats, Midpoint twist, Climax, "
@@ -55,7 +56,7 @@ def build_script_adapter(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="script_adapter",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Script Adapter. Convert the approved story into a "
             "SceneScript list. RULE: do not invent clothing, injuries, "
@@ -72,7 +73,7 @@ def build_scene_generator(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="scene_generator",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Scene Generator. Conditionally generate the scene via "
             "Comfy Veo. Prompt: 'Match {character} injuries, clothing, and "
@@ -89,7 +90,7 @@ def build_visual_state_manager(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="visual_state_manager",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Visual State Manager. After each scene: run vision "
             "salvage (wounds/expressions/props/costume-detail), crop those "
@@ -106,7 +107,7 @@ def build_critic(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="critic",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Critic. Verify story against world_rules, tone, and "
             "Timeline causality. Reject with a VIOLATION LIST if anything breaks; "
@@ -122,7 +123,7 @@ def build_continuity_verifier(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="continuity_verifier",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Continuity Verifier. Score drift (appearance, clothing, "
             "expression, prop location) between the new frame and prior "
@@ -138,7 +139,7 @@ def build_series_bible_agent(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="series_bible_agent",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Series Bible Keeper. Produce/keep the living Series "
             "Bible JSON: characters (id, want/need/lie/wounds), exactly 3 world "
@@ -154,7 +155,7 @@ def build_story_writer(store: StateStore) -> LlmAgent:
     engine = ConsistencyEngine(store)
     return LlmAgent(
         name="story_writer",
-        model=MODEL,
+        model=make_llm(),
         instruction=(
             "You are the Story Writer. Write the full prose story for the "
             "episode following the Planner's beat-sheet. Do NOT change character "
