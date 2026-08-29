@@ -1,0 +1,22 @@
+[project]
+name = "studio"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "kiloconnect[bot]", email = "240665456+kiloconnect[bot]@users.noreply.github.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.141.1",
+    "google-adk>=2.8.0",
+    "pydantic>=2.13.5",
+    "pytest>=9.1.1",
+    "uvicorn>=0.52.4",
+]
+
+[project.scripts]
+studio = "studio:main"
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13.0"]
+build-backend = "uv_build"
