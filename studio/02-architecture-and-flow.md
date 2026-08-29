@@ -30,6 +30,107 @@
 3. Evaluation artifacts (baseline vs agent, consistency score, trajectory diffs)
    are generated identically so the "improvement story" transfers across submissions.
 
+## 1b. Layered boundaries — WebMCP is frontend only
+
+```
+┌─────────────────────────────┐  browser  ┌──────────────────────────────────────────┐
+│  Browser (agent client)      │◄────────►│  WebMCP frontend SPA  (Layer 1 only)     │
+│  (Claude Code / ChatGPT /    │  MCP       │  React+Vite, declares document.           │
+│   Cursor / Codex)             │  /WebMCP   │  modelContext.registerTool(...)          │
+└─────────────────────────────┘            │  Pure-browser: Pyodide core OR              │
+                                           │        proxy to FastAPI backend            │
+                                           └──────────────────┬────────────────────────┘
+                                                              │  (HTTP / signed call)
+                                           ┌──────────────────┴────────────────────────┐
+                                           │  Backend services  (NOT in the browser)    │
+                                           │  • Comfy Cloud MCP (https://cloud.comfy.org/mcp) │
+                                           │  • Google Vertex AI / ADK agent (Cloud Run) │
+                                           │  • Firestore / ClickHouse / Cloud Storage   │
+                                           └──────────────────────────────────────────┘
+```
+
+WebMCP is a **browser-native** standard: the *web page itself* opts in by calling
+`document.modelContext.registerTool(...)` in its own JavaScript. It is purely frontend.
+An *external* agent (Claude Code, ChatGPT in-app browser, Cursor) connects to the page and
+calls those tools. WebMCP therefore never touches Comfy, Vertex AI, or GCP directly — it
+only mutates the live page state. Any heavy backend (media generation, persistence) is
+reached through an HTTP backend the SPA proxies to. Keep the WebMCP layer and the backend
+services **separate processes** (the WebMCP host has origin-isolation constraints that
+conflict with running arbitrary GCP sidecars).
+
+## 1c. End-to-end user-request flow (concrete example)
+
+Scenario: *"I just uploaded episode 4's transcript. Check continuity against the series,
+generate YouTube show notes, and make a 6-second teaser video."*
+
+**The request lands on an agent. What actually runs, per stack:**
+
+```
+User request
+     │
+     ▼
+┌──────────────────────────────────────────────────────────┐
+│ The agent (who receives this request):                    │
+│  Layer 1  → external agent on the WebMCP page             │
+│  Layer 2/3→ Google ADK LlmAgent (Gemini 3.5, Cloud Run)   │
+│  Layer 4  → a coding agent you pilot at micro1 kickoff    │
+└───────────────────────────┬──────────────────────────────┘
+                            │
+         ┌──────────────────┼───────────────────┐
+         ▼                  ▼                   ▼
+   ① load_series           (same call)        (same call)
+      • parses transcripts  • same call         • same call
+      • extracts entities   • same              • same
+                            │
+         ┌──────────────────┼───────────────────┐
+         ▼                  ▼                   ▼
+   ② check_consistency      (same)              (same)
+      • deterministic       • same               • same
+        rules (name/variant • same               • same
+        matching, callbacks, (same)              (same)
+        CTA checks)         • same               • same
+      • LLM tier (Gemini)    (same)              (same)
+      • writes Metric       • Firestore         • ClickHouse
+                            │
+         ┌──────────────────┼───────────────────┐
+         ▼                  ▼                   ▼
+   ③ generate_notes          (same)              (same)
+      YouTube template        • same               • same
+      (core engine)          • same               • same
+                            │
+         ┌──────────────────┼───────────────────┐
+         ▼                  ▼                   ▼
+   ④ MEDIA — the step that branches by stack:
+                            │
+     Layer 1 (WebMCP)       Layer 2 (GAT)        Layer 3 (Cinema)
+     no media gen in        ADK agent calls:     ADK agent calls:
+     the page itself        • Comfy MCP          • Veo directly on
+     (optional backend):    partner_generate     Vertex AI (compliant)
+     backend → Comfy        (Wan 2.2 OSS or     OR Comfy→partner_
+     or Veo; returns        Google Veo partner) generate→Veo       • ClickHouse
+     URL back to page       • returns asset URL   analytics written  (compliance
+     via WebMCP tool         to GCS, asset URL   partner)            partner)
+     set_episode_asset      to Firestore        (not Comfy)
+                            │
+         ┌──────────────────┼───────────────────┐
+         ▼                  ▼                   ▼
+   ⑤ Human sees the      ⑤ Firestore           ⑤ ClickHouse
+      live page update    persisted state      metrics +
+      (findings list,     + GCS asset          Veo video
+      notes preview,      • demo ready          in GCS
+      teaser preview)     (Cloud Run)          • demo ready
+                                              (Cloud Run)
+```
+
+**Key invariants across all layers:**
+- Steps ①–③ are the **same core engine** (pure Python); only the persistence store differs.
+- Step ④ (media) is where stacks **diverge**: WebMCP/GAT can use Comfy's OSS-or-Google-video
+  (no vendor restriction on GAT, none on WebMCP); Cinema must keep the AI on Google
+  (Veo-on-Vertex, optionally orchestrated through Comfy's Google partner node) so it stays
+  compliant.
+- Step ⑤ is always a **persistence write** (Firestore / ClickHouse / GCS) plus, for WebMCP
+  only, a `set_episode_asset` tool call that reflects the result back onto the live page.
+
 ## 2. Data model
 
 ```mermaid
