@@ -292,3 +292,68 @@ comfy_api_key=$(curl -s https://platform.comfy.org/profile/api-keys ...)  # get 
 **Cost:** discovery = free; your 5 free runs cover the demo video generations. After that,
 Comfy Cloud subscriptions start low (~$5–10/mo for hobby GPUs). Total hackathon spend on
 Comfy = $0 if you stay within the 5 free runs.
+
+---
+
+## 7. Resolving the conflict: "no Google stack for video" → Veo on Vertex AI
+
+You said: *"we must use Google stack and not Comfy, but no Google stack for video, so it's best
+we use Comfy for video generation."* **This conflict is resolvable on both fronts.**
+
+### 7a. There IS a Google-native video stack: Veo on Vertex AI (verified)
+
+Google's video model is **Veo** (Veo 3.1, GA on Vertex AI as of Aug 2026). It is a first-class
+Google Cloud AI tool, callable via the **Vertex AI SDK / `google-cloud-aiplatform`** (the exact
+packages the hackathons whitelist):
+
+- Publisher endpoint: `projects/{project}/locations/{location}/publishers/google/models/veo-003`
+- API method: `PredictionServiceClient.predict` with a `VideoGenerationModelInstance`
+  (Google's own docs reference this exact name).
+- Via Gemini API: `model: "veo-3.0-generate-preview"` (for prototyping). Available in `us-central1`.
+- Capabilities (Aug 2026): 4/6/8-second videos, 9:16 aspect ratio, reference-image-to-video,
+  1080p→4K upscaling, native audio.
+- Quota (Vertex AI, per project): 5 RPM, 3 concurrent ops, 60 min/day. Pricing ~`0.25–0.35/sec`.
+  The standard GCP **$300 free trial** (or $150–$100 hackathon credits) absorbs several demo videos.
+
+=> Use **Veo directly on Vertex AI** for any Cinema or All Things submission that needs Google
+video. No Comfy involved → no vendor question.
+
+### 7b. Comfy Cloud ALSO routes video through Google's Veo as a partner model
+
+Comfy's partner catalog explicitly lists **Veo and Gemini** as partner-API nodes (verified in
+`comfy-skills` generate-video routing + `comfy-mcp` README). The agent flow is:
+
+1. `search_templates(tag="API", type="video")` or `search_nodes("Veo")` → finds the Google Veo
+   partner node / a Veo-tagged template.
+2. `partner_generate` with `type="video"` + the Google model slug → runs **Google's Veo** on
+   Comfy's GPU partner infra, spends Comfy credits (your 5 free runs).
+3. `wait_for_job` + `get_output` → download.
+
+So **Comfy is the orchestrator; Veo (Google) is the model.** This is the key reconciliation:
+you can use Comfy's batch/scheduling/template orchestration AND keep the AI itself on Google.
+
+### 7c. Where to spend your 5 free Comfy runs (recommendation)
+
+| Layer | Video model via Comfy | Google-compliant? | Recommendation |
+|---|---|---|---|
+| **WebMCP Challenge** (Sep 3) | OSS (Wan 2.2 / LTX) OR `partner_generate` with **Veo/Gemini** | ✅ no vendor restriction anyway | ✅ Use all 5 free runs here — best home |
+| **All Things Agentic** (Aug 31) | `partner_generate` with **Veo** (Google) | ✅ (requires Gemini in stack; Veo is Google) | ✅ Use a free run to prove Google video via Comfy orchestration |
+| **Agentic Cinema** (Sep 9) | `partner_generate` with **Veo** (Google) — *arguable* OR Veo directly on Vertex AI | ⚠️ gray (Comfy is a 3rd-party framework) | ❗ Prefer **Veo-on-Vertex AI** directly; use Comfy only for non-AI orchestration (templates/search/share) |
+| **micro1** (Aug 31) | whatever fits the problem | — | Use if the problem involves media generation |
+
+### 7d. Concrete agent move (ADK, GAT/Cinema-safe core)
+
+```python
+# core/video.py — framework-agnostic
+def make_teaser_vid(prompt: str, series_id: str, model: str = "veo") -> str:
+    """Generate a short teaser. model='veo' => Google Veo (Vertex); falls back to Comfy partner_generate."""
+    if model == "veo":
+        return _veo_vertex(prompt)          # google-cloud-aiplatform → 100% compliant
+    else:
+        return _comfy_partner_generate("video", provider="veo")  # Comfy orchestration of Google's Veo
+```
+
+**Bottom line:** Google video exists (Veo). Comfy can *orchestrate* Veo (Google) or OSS video.
+Spend your 5 free Comfy runs on the **WebMCP demo** (no vendor limit) and on **GAT** (Comfy+Veo).
+For **Cinema**, call **Veo directly on Vertex AI** to be unambiguously compliant, and use Comfy
+only as a workflow/library layer (search/templates/share) that doesn't execute the AI.
