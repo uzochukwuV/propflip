@@ -102,6 +102,15 @@ The agent calls WebMCP tools on the page, then calls Comfy tools in its own envi
 then writes the resulting asset back onto the page (via a `set_episode_asset` WebMCP tool
 you define) so the human sees it update live.
 
+### Key constraint: WebMCP tools live in YOUR frontend, not on existing sites
+
+WebMCP does **not** auto-instrument arbitrary websites. The page itself must opt in by
+calling `document.modelContext.registerTool(...)` in its own JS/TS. An external agent
+(Claude Code / ChatGPT in-app / Cursor) then discovers those declared tools and invokes
+them. Existing platforms only expose WebMCP tools if their owners already shipped that
+`registerTool` code. Therefore the WebMCP Challenge *requires* you to build/adapt the
+frontend that declares the tools — there is no shortcut.
+
 **WebMCP tool to expose asset write-back:**
 ```javascript
 await document.modelContext.registerTool({
