@@ -1,0 +1,9 @@
+Using CPython 3.10.12 interpreter at: /usr/bin/python3.10
+Creating virtual environment at: .venv
+Activate with: source .venv/bin/activate
+Using CPython 3.10.12 interpreter at: /usr/bin/python3.10
+Creating virtual environment at: .venv
+error: Failed to create virtual environment
+  Caused by: A virtual environment already exists at: .venv
+
+hint: Use the `--clear` flag or set `UV_VENV_CLEAR=1` to replace the existing virtual environment

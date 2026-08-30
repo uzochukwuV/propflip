@@ -15,7 +15,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..core.continuity import ConsistencyEngine
+from ..core.continuity_check import verify_script
 from ..state.store import CharacterState, SceneScript, StateStore
+from ..workflow import MockLLM, prepare_envelope, run_full, run_scene
 
 router = APIRouter(prefix="/studio", tags=["studio"])
 _STATE_DIR = os.environ.get("STUDIO_STATE_DIR", "/tmp/studio_state")
@@ -160,6 +162,42 @@ def run_scene_cycle(engine: ConsistencyEngine = Depends(get_engine)):
         "updated_state": {k: asdict(v) for k, v in changed.items()},
         "next_envelope": asdict(env),
     }
+
+
+@router.get("/envelope/{episode}/{scene}")
+def get_envelope(episode: str, scene: str, store: StateStore = Depends(get_store)):
+    script = SceneScript(
+        scene_id=scene, setting="", lighting="", seed=0,
+        characters=[], prev_frame_ref="", camera="", style="",
+    )
+    try:
+        env = prepare_envelope(store, episode, script)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return asdict(env)
+
+
+class RunFullIn(BaseModel):
+    llm: str = "mock"
+
+
+@router.post("/run/full")
+def run_full_endpoint(
+    episode: str, scene: str,
+    body: RunFullIn | None = None,
+    store: StateStore = Depends(get_store),
+):
+    llm = MockLLM()
+    engine = ConsistencyEngine(store)
+    script = SceneScript(
+        scene_id=scene, setting="", lighting="", seed=0,
+        characters=[], prev_frame_ref="", camera="", style="",
+    )
+    try:
+        trace = run_full(store, episode, scene, llm=llm)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return trace
 
 
 @router.get("/health")

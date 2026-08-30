@@ -1,13 +1,14 @@
 """Scene-to-scene continuity: keyframe salvage + resource-envelope builder.
 
-Implements the Level-2 handoff from studio/05-agentic-workflow.md:
-after a scene renders, run a vision pass to extract wounds/expressions/
-props/costume details, persist them into CharacterState, and build the
-3-part resource envelope fed into the NEXT scene generation call.
+After a scene renders, run a vision pass to extract persistent visual STATE
+facets (wounds, expressions, props, costume damage, pose) and persist them
+into the CharacterState card so they carry forward into the NEXT scene and
+the NEXT episode. Injuries are just one facet of the general state card.
 
-Framework-agnostic. A VisionBackend is Callable[[bytes, str], str]
-(image bytes, task_prompt -> raw model JSON). When None, a deterministic
-mock is used so the loop runs end-to-end without a vision backend.
+Framework-agnostic. ``vision`` is a VisionBackend (image, prompt -> JSON).
+When None, salvage relies on explicit ``salvage_hints`` in the scene output
+(deterministic demo path); a real vision backend (Gemini) is plugged in for
+production.
 """
 from __future__ import annotations
 
@@ -17,16 +18,16 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from ..state.store import CharacterState, SceneScript, StateStore, SalvagedAsset
 
 VISION_TASK_PROMPT = (
     "You are a continuity extractor. From the video frame(s), return ONLY a JSON "
-    "list of objects: {kind:'wound|expression|prop|costume_detail', character, "
-    "detail, region:[x,y,w,h], confidence:0-1}. Do not include anything else. "
-    "Look for: wounds/injuries, facial expressions, held/ground props, costume "
-    "damage/staining. Frame size = {w}x{h}."
+    "list of objects: {kind:'wound|expression|prop|costume_detail|pose', character, "
+    "detail, region:[x,y,w,h], confidence:0-1}. Extract any persistent visual state: "
+    "wounds/injuries, facial expressions, held/ground props, costume damage/staining, "
+    "and recurring poses/posture. Omit absent items."
 )
 
 
@@ -60,17 +61,29 @@ class ConsistencyEngine:
         if not frames:
             raise ValueError(f"no frames in scene {scene_id}")
         target = frames[-1]
-        img_bytes = self._read_frame(target)
-        w, h = target.get("size", (1024, 576))
         character = target["character"]
-        parsed = self._parse(self._vision(img_bytes, w, h))
+        w, h = target.get("size", (1024, 576))
+
+        parsed: list[dict] = []
+        if self.vision is not None:
+            parsed.extend(self._parse(self._vision(target, w, h)))
+        for hint in scene_output.get("salvage_hints", []):
+            if isinstance(hint, dict):
+                parsed.append(dict(hint))
+
         out: list[SalvagedAsset] = []
+        seen: set[tuple[str, str, str]] = set()
         for item in parsed:
-            path = self.store.write_asset(scene_id, character, item["detail"],
-                                          item["kind"], item.get("region"),
-                                          item.get("confidence", 0.0))
+            cname = item.get("character", character)
+            key = (cname, item["kind"], item["detail"])
+            if key in seen:
+                continue
+            seen.add(key)
+            path = self.store.write_asset(
+                scene_id, cname, item["detail"], item["kind"],
+                item.get("region"), item.get("confidence", 0.0))
             out.append(SalvagedAsset(
-                scene_id=scene_id, character=character, kind=item["kind"],
+                scene_id=scene_id, character=cname, kind=item["kind"],
                 detail=item["detail"], path=path,
                 confidence=item.get("confidence", 0.0),
                 region=item.get("region"),
@@ -83,14 +96,8 @@ class ConsistencyEngine:
             return frame["bytes"]
         return Path(frame["path"]).read_bytes()
 
-    def _vision(self, img_bytes: bytes, w: int, h: int) -> str:
-        if self.vision is None:
-            return json.dumps([{
-                "kind": "wound", "character": "kara",
-                "detail": "blood on right hand (wiped, diminished)",
-                "region": [w // 2 - 40, w // 2 + 40, 80, 60], "confidence": 0.91,
-            }])
-        return self.vision.run(img_bytes, VISION_TASK_PROMPT.format(w=w, h=h))
+    def _vision(self, frame: dict, w: int, h: int) -> str:
+        return self.vision.run(self._read_frame(frame), VISION_TASK_PROMPT.format(w=w, h=h))
 
     @staticmethod
     def _parse(raw: str) -> list[dict]:
@@ -116,9 +123,13 @@ class ConsistencyEngine:
             if st.lora_ref:
                 refs.append(st.lora_ref)
             refs.extend(self.store.latest_assets(name, 3))
-            snap[name] = {"clothing": st.clothing, "injuries": st.injuries,
-                          "mood": st.emotional_residue,
-                          "carry_clause": st.carry_clause()}
+            snap[name] = {
+                "clothing": st.clothing, "injuries": st.injuries,
+                "carried_props": st.carried_props,
+                "mood": st.emotional_residue,
+                "pose": st.pose_tendency,
+                "carry_clause": st.carry_clause(),
+            }
         if script.prev_frame_ref:
             refs.append(script.prev_frame_ref)
         return ResourceEnvelope(
@@ -129,14 +140,19 @@ class ConsistencyEngine:
         )
 
     def apply(self, assets: list[SalvagedAsset]) -> dict[str, CharacterState]:
-        """Apply salvaged assets to each character's persisted state (snap & feed)."""
+        """Apply salvaged STATE facets to each character's card (snap & feed).
+
+        Wounds, clothing, props, expression and pose are ALL facets of the
+        general state card; each is updated from a salvaged asset (never
+        invented). The card is the single carrier of continuity across scenes
+        and episodes.
+        """
         changed: dict[str, CharacterState] = {}
         for a in assets:
             state = self.load_state(a.character)
             if a.kind == "wound":
-                bp = self._body_part(a.detail)
-                if bp:
-                    state.injuries[bp] = a.detail
+                key = re.sub(r"[\W_]+", "_", a.detail).strip("_") or "wound"
+                state.injuries[key] = a.detail
             elif a.kind == "expression":
                 state.emotional_residue = a.detail
             elif a.kind == "costume_detail":
@@ -144,25 +160,14 @@ class ConsistencyEngine:
             elif a.kind == "prop":
                 state.carried_props = [p for p in state.carried_props if a.detail not in p]
                 state.carried_props.append(a.detail)
+            elif a.kind == "pose":
+                state.pose_tendency = a.detail
             state.last_seen_in = state.last_seen_in or a.scene_id
             self.store.save_character(state)
             self.store.append_injury({"character": a.character, "when": a.scene_id,
-                                      "wound": a.detail, "status": "active"})
+                                      "detail": a.detail, "kind": a.kind, "status": "active"})
             changed[a.character] = state
         return changed
-
-    @staticmethod
-    def _body_part(detail: str) -> str | None:
-        d = detail.lower()
-        if "hand" in d:
-            return "hand"
-        if "forearm" in d:
-            return "forearm"
-        if "face" in d or "cheek" in d or "lip" in d:
-            return "face"
-        if "eye" in d:
-            return "eye"
-        return None
 
 
 def content_hash(path: str) -> str:

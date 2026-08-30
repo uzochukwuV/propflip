@@ -140,8 +140,8 @@ class StateStore:
             st.lora_ref = f"loras/{c['id']}_v1.safetensors"
             st.clothing = {"coveralls": True}
             self.save_character(st)
-        # write a placeholder base portrait so paths resolve in demo
-        (self.assets / "char_kara_base.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        for c in bible.get("characters", []):
+            (self.assets / f"char_{c['id']}_base.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
 
 def re_sub(s: str) -> str:
