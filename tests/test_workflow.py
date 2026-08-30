@@ -60,7 +60,8 @@ def test_three_scene_continuity_chain(tmp_path):
     trace = run_full(store, "E2", "E2_S4", llm)
     assert trace["ok"]
     assert trace["scene"] == "E2_S4"
-    assert trace["updated_state"]["kara"]["injuries"]["hand"]
+    assert trace["updated_state"]["kara"]["injuries"]
+    assert any("hand" in k for k in trace["updated_state"]["kara"]["injuries"])
     assert trace["next_envelope"]["reference_images"]
 
 

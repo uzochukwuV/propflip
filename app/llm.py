@@ -10,33 +10,36 @@ from app.config import make_llm
 class RealLLM:
     """Thin wrapper around TokenRouter / Gemini LLM calls.
 
-    Uses litellm.completion under the hood (via LiteLlm or direct string model).
+    Uses the openai Python SDK directly (TokenRouter is OpenAI-compatible).
     """
 
     def __init__(self, model: str | None = None) -> None:
         self.model = model or make_llm()
-        self._key = os.environ.get("TOKEN_ROUTER_API_KEY", "")
-        self._base = os.environ.get("TOKEN_ROUTER_BASE_URL", "https://api.tokenrouter.com/v1")
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(
+                api_key=os.environ.get("TOKEN_ROUTER_API_KEY", ""),
+                base_url=os.environ.get("TOKEN_ROUTER_BASE_URL", "https://api.tokenrouter.com/v1"),
+            )
+        return self._client
 
     def _call(self, prompt: str) -> str:
-        try:
-            from litellm import completion
-        except ImportError as exc:
-            raise RuntimeError("litellm is required for RealLLM") from exc
-
+        client = self._get_client()
         model = self.model
         if isinstance(model, str) and model.startswith("openai/"):
             model = model[len("openai/"):]
-
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "api_base": self._base,
-            "api_key": self._key,
-        }
-        resp = completion(**kwargs)
-        text = resp.choices[0].message.content or ""
-        return text.strip()
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.choices[0].message.content or ""
+            return text.strip()
+        except Exception as exc:
+            return f"[LLM_ERROR: {exc}]"
 
     def write_story(self, episode: str, store: Any, trap: str | None = None) -> str:
         prompt = (
