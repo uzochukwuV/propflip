@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# Idempotent env bootstrap. This sandbox wipes ~/.local/bin/uv and .venv between
-# turns, so every run must self-recover. We install uv into the project tree
-# (.uv-bin) so the binary itself persists alongside source.
 set -u
-PROJ=/workspace/86f7610d-18e7-4a1b-ba50-ff3b60d660c4/sessions/agent_ef2d0c4e-6c72-4250-9050-527e0796e94d
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ"
 mkdir -p logs .uv-bin
 UV="$PROJ/.uv-bin/uv"

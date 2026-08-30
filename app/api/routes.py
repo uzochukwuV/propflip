@@ -17,7 +17,8 @@ from pydantic import BaseModel, Field
 from ..core.continuity import ConsistencyEngine
 from ..core.continuity_check import verify_script
 from ..state.store import CharacterState, SceneScript, StateStore
-from ..workflow import MockLLM, prepare_envelope, run_full, run_scene
+from ..workflow import MockLLM, generate_notes, generate_teaser, generate_thumbnail
+from ..workflow import prepare_envelope, run_eval, run_full, run_scene
 
 router = APIRouter(prefix="/studio", tags=["studio"])
 _STATE_DIR = os.environ.get("STUDIO_STATE_DIR", "/tmp/studio_state")
@@ -54,6 +55,12 @@ class ScriptIn(BaseModel):
     prev_frame_ref: str = ""
     camera: str = ""
     style: str = ""
+
+
+class EvalIn(BaseModel):
+    episode: str
+    scene: str
+    llm: str = "mock"
 
 
 @router.post("/bible")
@@ -135,21 +142,18 @@ def generate_scene(s: ScriptIn, engine: ConsistencyEngine = Depends(get_engine))
 @router.post("/run/scene")
 def run_scene_cycle(engine: ConsistencyEngine = Depends(get_engine)):
     """Full snap-and-feed loop (studio/05 §C): salvage -> apply -> envelope."""
+    from app.media_backend import MockMediaBackend
     store = engine.store
-    scene_output = {
-        "scene_id": "E2_S5",
-        "frames": [{
-            "character": "kara",
-            "path": str(store.assets / "char_kara_base.png") or "",
-            "size": (1024, 576),
-        }],
-    }
-    # ensure the base asset exists for the mock frame path
-    (store.assets / "char_kara_base.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    assets = engine.salvage(scene_output)
+    media = MockMediaBackend()
+    scene_script = SceneScript(
+        scene_id="E2_S5", setting="corridor", lighting="dim red", seed=44,
+        characters=[{"name": "kara", "emotion": "grim focus",
+                     "action": "wipes right hand on sleeve"}],
+        prev_frame_ref="", camera="medium close-up, push-in", style="noir",
+    )
+    scene_out = media.generate_scene(asdict(scene_script), store)
+    assets = engine.salvage(scene_out)
     changed = engine.apply(assets)
-    # build envelope that the NEXT scene would consume
-    from app.state.store import SceneScript
     nxt = SceneScript(scene_id="E3_S1", setting="cargo bay", lighting="emergency orange",
                       seed=42,
                       characters=[{"name": "kara", "emotion": "grim focus",
@@ -177,17 +181,15 @@ def get_envelope(episode: str, scene: str, store: StateStore = Depends(get_store
     return asdict(env)
 
 
-class RunFullIn(BaseModel):
-    llm: str = "mock"
-
-
 @router.post("/run/full")
 def run_full_endpoint(
     episode: str, scene: str,
-    body: RunFullIn | None = None,
+    body: EvalIn | None = None,
     store: StateStore = Depends(get_store),
 ):
-    llm = MockLLM()
+    llm_mode = (body.llm if body and body.llm else "mock").lower()
+    os.environ.setdefault("STUDIO_LLM", llm_mode)
+    llm = MockLLM() if llm_mode == "mock" else None
     engine = ConsistencyEngine(store)
     script = SceneScript(
         scene_id=scene, setting="", lighting="", seed=0,
@@ -200,6 +202,35 @@ def run_full_endpoint(
     return trace
 
 
+@router.post("/run/eval")
+def run_eval_endpoint(
+    episode: str, scene: str,
+    body: EvalIn | None = None,
+    store: StateStore = Depends(get_store),
+):
+    llm_mode = (body.llm if body and body.llm else "mock").lower()
+    os.environ.setdefault("STUDIO_LLM", llm_mode)
+    llm = MockLLM() if llm_mode == "mock" else None
+    result = run_eval(store, episode, scene, llm=llm)
+    return result
+
+
+@router.post("/assets/teaser")
+def assets_teaser(episode: str, store: StateStore = Depends(get_store)):
+    return generate_teaser(store, episode)
+
+
+@router.post("/assets/thumbnail")
+def assets_thumbnail(scene_id: str, store: StateStore = Depends(get_store)):
+    return generate_thumbnail(store, scene_id)
+
+
+@router.post("/assets/notes")
+def assets_notes(episode: str, store: StateStore = Depends(get_store)):
+    return generate_notes(store, episode)
+
+
 @router.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "layer": "fastapi+adk"}
+
