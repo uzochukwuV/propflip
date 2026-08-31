@@ -77,6 +77,61 @@ class TimelineEntry:
     status: str
 
 
+@dataclass
+class Location:
+    canonical: str
+    variants: list[str] = field(default_factory=list)
+    visual_ref: str = ""
+    description: str = ""
+
+
+@dataclass
+class Fact:
+    claim: str
+    source_scene: str = ""
+    confidence: float = 1.0
+
+
+@dataclass
+class ConsistencyFinding:
+    type: str
+    target: str
+    severity: str
+    excerpt: str
+    suggestion: str
+    evidence_ref: str = ""
+
+
+@dataclass
+class GeneratedAsset:
+    key: str
+    kind: str
+    ref: str
+    workflow_id: str
+    version: str = ""
+
+
+@dataclass
+class Metric:
+    series_id: str
+    episode_id: str
+    scene_id: str
+    score: float = 0.0
+    breakdown: dict[str, Any] = field(default_factory=dict)
+    ts: str = ""
+
+
+@dataclass
+class Series:
+    series_id: str
+    name: str
+    characters: list[dict[str, Any]] = field(default_factory=list)
+    locations: list[Location] = field(default_factory=list)
+    facts: list[Fact] = field(default_factory=list)
+    tone_rules: list[str] = field(default_factory=list)
+    language: str = "en"
+
+
 class StateStore:
     """Filesystem-backed state store (swap Firestore behind the same methods)."""
 
@@ -142,6 +197,34 @@ class StateStore:
             self.save_character(st)
         for c in bible.get("characters", []):
             (self.assets / f"char_{c['id']}_base.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    # ---- metrics / findings ----
+    def save_metric(self, metric: Metric) -> None:
+        mdir = self.root / "metrics"
+        mdir.mkdir(parents=True, exist_ok=True)
+        p = mdir / f"{metric.series_id}_{metric.episode_id}_{metric.scene_id}.json"
+        p.write_text(json.dumps(asdict(metric), indent=2))
+
+    def load_metric(self, series_id: str, episode_id: str, scene_id: str) -> Metric | None:
+        p = self.root / "metrics" / f"{series_id}_{episode_id}_{scene_id}.json"
+        if not p.exists():
+            return None
+        return Metric(**json.loads(p.read_text()))
+
+    def save_finding(self, finding: ConsistencyFinding) -> None:
+        fdir = self.root / "findings"
+        fdir.mkdir(parents=True, exist_ok=True)
+        p = fdir / f"{finding.target}_{finding.type}.json"
+        p.write_text(json.dumps(asdict(finding), indent=2))
+
+    def list_findings(self, target: str) -> list[ConsistencyFinding]:
+        fdir = self.root / "findings"
+        out: list[ConsistencyFinding] = []
+        if not fdir.exists():
+            return out
+        for p in fdir.glob(f"{target}_*.json"):
+            out.append(ConsistencyFinding(**json.loads(p.read_text())))
+        return out
 
 
 def re_sub(s: str) -> str:

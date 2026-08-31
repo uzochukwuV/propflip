@@ -1,4 +1,4 @@
-"""Workflow orchestrator: story -> script -> scene with MockLLM and revision loops."""
+"""Workflow orchestrator: story -> script -> scene with MockLLM/RealLLM and revision loops."""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,8 @@ from typing import Any
 from app.core.continuity import ConsistencyEngine, ResourceEnvelope
 from app.core.continuity_check import critique_story, verify_script, verify_scene
 from app.state.store import CharacterState, SceneScript, StateStore
+from app.llm import RealLLM
+from app.media_backend import MockMediaBackend
 
 
 class MockLLM:
@@ -90,11 +92,23 @@ class MockLLM:
         }
 
 
-def run_story_loop(store: StateStore, episode: str, llm: MockLLM | None = None,
+def _resolve_llm() -> MockLLM | RealLLM:
+    if os.environ.get("STUDIO_LLM", "mock").lower() == "real":
+        return RealLLM()
+    return MockLLM()
+
+
+def _resolve_media() -> MockMediaBackend:
+    return MockMediaBackend()
+
+
+def run_story_loop(store: StateStore, episode: str, llm: MockLLM | RealLLM | None = None,
                    trap: str | None = None) -> str:
     if llm is None:
-        llm = MockLLM()
+        llm = _resolve_llm()
     max_rev = 3
+    story = ""
+    rev = 0
     for rev in range(max_rev):
         story = llm.write_story(episode, store, trap if rev == 0 else None)
         result = critique_story(store, story, episode)
@@ -106,17 +120,18 @@ def run_story_loop(store: StateStore, episode: str, llm: MockLLM | None = None,
     stories_dir.mkdir(parents=True, exist_ok=True)
     (stories_dir / f"{episode}.json").write_text(json.dumps({
         "episode": episode, "status": "approved", "text": story,
-        "revisions": rev + 1 if 'rev' in dir() else 1,
+        "revisions": rev + 1,
     }, indent=2))
     return story
 
 
 def run_script_loop(store: StateStore, story: str, episode: str,
-                    llm: MockLLM | None = None) -> list[SceneScript]:
+                    llm: MockLLM | RealLLM | None = None) -> list[SceneScript]:
     if llm is None:
-        llm = MockLLM()
+        llm = _resolve_llm()
     max_rev = 2
     scripts: list[dict[str, Any]] = []
+    rev = 0
     for rev in range(max_rev):
         scripts = llm.adapt_script(story, store, episode)
         result = verify_script(store, {"scenes": scripts})
@@ -135,9 +150,12 @@ def run_script_loop(store: StateStore, story: str, episode: str,
 
 
 def run_scene(store: StateStore, engine: ConsistencyEngine, scene_script: SceneScript,
-              llm: MockLLM | None = None, vision: Any = None) -> dict[str, Any]:
+              llm: MockLLM | RealLLM | None = None, media: MockMediaBackend | None = None,
+              vision: Any = None) -> dict[str, Any]:
     if llm is None:
-        llm = MockLLM()
+        llm = _resolve_llm()
+    if media is None:
+        media = _resolve_media()
     script_dict = asdict(scene_script)
     envelope = engine.build_envelope(scene_script)
     max_tries = 2
@@ -175,10 +193,61 @@ def prepare_envelope(store: StateStore, episode: str,
     return env
 
 
-def run_full(store: StateStore, episode: str, scene_id: str,
-             llm: MockLLM | None = None, vision: Any = None) -> dict[str, Any]:
+def generate_notes(store: StateStore, episode: str, llm: MockLLM | RealLLM | None = None) -> dict[str, Any]:
     if llm is None:
-        llm = MockLLM()
+        llm = _resolve_llm()
+    bible = _load_bible(store)
+    prompt = (
+        f"Generate show notes for episode '{episode}' of '{bible.get('title', 'Untitled')}'. "
+        "Include: key events, continuity callbacks, and character state changes. "
+        "Output markdown only."
+    )
+    notes = llm._call(prompt) if hasattr(llm, "_call") else str(llm)
+    return {"episode": episode, "kind": "notes", "content": notes}
+
+
+def generate_teaser(store: StateStore, episode: str, media: MockMediaBackend | None = None) -> dict[str, Any]:
+    if media is None:
+        media = _resolve_media()
+    return media.generate_teaser(episode, store)
+
+
+def generate_thumbnail(store: StateStore, scene_id: str, media: MockMediaBackend | None = None) -> dict[str, Any]:
+    if media is None:
+        media = _resolve_media()
+    return media.generate_thumbnail(scene_id, store)
+
+
+def run_eval(store: StateStore, episode: str, scene_id: str,
+             llm: MockLLM | RealLLM | None = None) -> dict[str, Any]:
+    if llm is None:
+        llm = _resolve_llm()
+    trace = run_full(store, episode, scene_id, llm)
+    score = 1.0 if trace.get("ok") else 0.0
+    for stage in trace.get("stage", {}).values():
+        if isinstance(stage, dict) and not stage.get("ok", True):
+            score -= 0.2
+    score = max(0.0, min(1.0, score))
+    metric = store.load_metric(store.root.name.split("/")[-1] if "/" in str(store.root) else "series",
+                               episode, scene_id)
+    if metric is None:
+        from app.state.store import Metric, datetime, timezone
+        metric = Metric(
+            series_id="series",
+            episode_id=episode,
+            scene_id=scene_id,
+            score=score,
+            breakdown={"overall": score},
+            ts=datetime.now(timezone.utc).isoformat(),
+        )
+        store.save_metric(metric)
+    return {"continuity_accuracy": score, "trace": trace}
+
+
+def run_full(store: StateStore, episode: str, scene_id: str,
+             llm: MockLLM | RealLLM | None = None, vision: Any = None) -> dict[str, Any]:
+    if llm is None:
+        llm = _resolve_llm()
     trace: dict[str, Any] = {
         "episode": episode, "scene": scene_id,
         "stage": {}, "violations": [],
@@ -217,7 +286,7 @@ def run_full(store: StateStore, episode: str, scene_id: str,
     except ValueError as exc:
         raise ValueError(f"envelope incomplete: {exc}")
 
-    scene_res = run_scene(store, engine, target_script, llm, vision)
+    scene_res = run_scene(store, engine, target_script, llm, vision=vision)
     trace["stage"]["scene"] = {
         "ok": scene_res.get("verify", {}).get("ok", True),
         "violations": scene_res.get("verify", {}).get("violations", []),
@@ -250,3 +319,4 @@ def _load_bible(store: StateStore) -> dict[str, Any]:
     if not p.exists():
         return {}
     return json.loads(p.read_text())
+

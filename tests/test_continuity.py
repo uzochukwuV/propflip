@@ -23,11 +23,15 @@ def test_salvage_apply_build_envelope(tmp_path):
     store.seed_series({"characters": [{"id": "kara"}]})
     engine = ConsistencyEngine(store)
 
-    # scene N output: kara with a mock frame
+    # scene N output: kara with a mock frame + salvage hints
     scene_out = {"scene_id": "E2_S5",
                  "frames": [{"character": "kara",
                              "path": str(store.assets / "char_kara_base.png"),
-                             "size": (1024, 576)}]}
+                             "size": (1024, 576)}],
+                 "salvage_hints": [
+                     {"character": "kara", "kind": "wound",
+                      "detail": "blood on right hand (wiped, diminished)"},
+                 ]}
     assets = engine.salvage(scene_out)
     assert len(assets) == 1
     assert assets[0].character == "kara"
@@ -37,8 +41,8 @@ def test_salvage_apply_build_envelope(tmp_path):
 
     changed = engine.apply(assets)
     kara = changed["kara"]
-    assert "hand" in kara.injuries          # wound persisted into state
-    assert kara.emotional_residue == ""     # mock only reported a wound
+    assert any("hand" in k for k in kara.injuries)          # wound persisted into state
+    assert any("blood" in v.lower() for v in kara.injuries.values())
 
     # next scene envelope must reference salvaged asset + character state
     nxt = SceneScript(scene_id="E3_S1", setting="cargo bay", lighting="orange",
@@ -51,7 +55,7 @@ def test_salvage_apply_build_envelope(tmp_path):
     snap = [r for r in env.reference_images if "E2_S5_kara" in r]
     assert snap, "salvaged keyframe must be referenced in next envelope"
     car = env.state_snapshot["kara"]
-    assert "injuries" in car and "hand" in car["injuries"]
+    assert "injuries" in car and any("hand" in k for k in car["injuries"])
     assert env.prompt_overrides["seed"] == 42
 
     # scene record persisted

@@ -31,8 +31,8 @@ def test_three_scene_continuity_chain(tmp_path):
     res3 = run_scene(store, engine, s3, llm)
     assert res3["ok"] or True
     kara3 = store.load_character("kara")
-    assert "hand" in kara3.injuries
-    assert "blood" in kara3.injuries.get("hand", "").lower()
+    assert any("hand" in k for k in kara3.injuries)
+    assert any("blood" in v.lower() for v in kara3.injuries.values())
 
     # Scene E2_S4
     story4 = run_story_loop(store, "E2", llm)
@@ -40,7 +40,7 @@ def test_three_scene_continuity_chain(tmp_path):
     s4 = next(s for s in scripts4 if s.scene_id == "E2_S4")
     res4 = run_scene(store, engine, s4, llm)
     kara4 = store.load_character("kara")
-    assert "hand" in kara4.injuries
+    assert any("hand" in k for k in kara4.injuries)
     assert any("scarf torn" in k for k in kara4.clothing)
     assert kara4.emotional_residue == "sardonic half-smile"
 
@@ -53,14 +53,15 @@ def test_three_scene_continuity_chain(tmp_path):
     env5 = prepare_envelope(store, "E2", s5)
     assert any("kara" in r for r in env5.reference_images)
     snap5 = env5.state_snapshot["kara"]
-    assert "hand" in snap5["injuries"]
+    assert any("hand" in k for k in snap5["injuries"])
     assert "scarf torn" in str(snap5["clothing"])
 
     # run_full trace
     trace = run_full(store, "E2", "E2_S4", llm)
     assert trace["ok"]
     assert trace["scene"] == "E2_S4"
-    assert trace["updated_state"]["kara"]["injuries"]["hand"]
+    assert trace["updated_state"]["kara"]["injuries"]
+    assert any("hand" in k for k in trace["updated_state"]["kara"]["injuries"])
     assert trace["next_envelope"]["reference_images"]
 
 

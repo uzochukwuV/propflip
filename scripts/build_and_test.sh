@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -u
-LOG=/tmp/agent_ef2d0c4e-6c72-4250-9050-527e0796e94d/studio_build.log
+PROJ="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="$PROJ/logs/build_and_test.log"
 : > "$LOG"
-cd /workspace/86f7610d-18e7-4a1b-ba50-ff3b60d660c4/sessions/agent_ef2d0c4e-6c72-4250-9050-527e0796e94d
+cd "$PROJ"
 export PATH="$HOME/.local/bin:$PATH"
 echo "=== install uv ===" | tee -a "$LOG"
 sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh' >> "$LOG" 2>&1
